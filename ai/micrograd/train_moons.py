@@ -32,6 +32,8 @@ def train(steps:int = 100, learning_rate= 0.05):
 
         #update (gradient_Descent)
         for p in model.parameters():
+            # gradients are positive increasing the loss but we dont want to increase the loss
+            #decreasing means we are better
             p.data -= learning_rate * p.grad
 
         accuracy = sum((pred.data>0) == (label > 0) for pred, label in zip(predictions, labels))/len(labels)
