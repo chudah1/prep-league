@@ -154,6 +154,7 @@ class Bank:
             if payment.account_id == account_id_2:
                 payment.account_id = account_id_1
         self.audit[account_id_1].append((timestamp, target.amount))
+        #mmerged away
         self.audit[account_id_2].append((timestamp, None))
 
         del self.transfers[account_id_2]
@@ -165,6 +166,7 @@ class Bank:
         
         audits = self.audit.get(account_id, [])
 
+        #before or at
         entries_before_at = bisect_right(audits, time_at, key= lambda entry: entry[0]) -1
 
         if entries_before_at < 0: return None
