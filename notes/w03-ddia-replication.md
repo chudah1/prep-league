@@ -2,28 +2,34 @@
 
 **What can be lost on leader failover with asynchronous replication, and how would you limit it?**
 
-With asynchronous replication, a leader may acknowledge a write before followers persist it. If that leader is permanently lost and a lagging follower is promoted, acknowledged writes absent from that follower can disappear. This is data loss, not just a temporary stale read.
+With async replication, we can reply to the client before the follower gets the write. So if x was 1 and the leader updated it to 2, the follower might still have 1. If the leader dies permanently and that follower takes over, clients read 1, even though the client was already told the write worked.
 
-Monitor replication lag and choose the most advanced eligible follower to reduce exposure, but asynchronous acknowledgement alone cannot promise zero loss. For stronger durability, acknowledge only after required failover replicas persist the write, and promote a replica containing those acknowledged writes. This adds latency and can block writes when those replicas are unavailable. Persistence and visibility differ: a follower may still need to replay its durable log before serving the new value. [PostgreSQL replication](https://www.postgresql.org/docs/current/warm-standby.html)
+For this leader-and-follower setup, I would use synchronous replication if we cannot accept losing that write. We wait for the follower to save the write to disk before replying. The cost is that writes take longer, and if the required follower is down we may have to wait or reject writes. [Reference](https://www.postgresql.org/docs/current/warm-standby.html)
 
 **How does a new follower catch up (snapshot plus log position)?**
 
-Take a consistent snapshot with an associated replication-log position P, not merely a timestamp. Restore it on the new follower, then replay the subsequent log in order while the leader keeps accepting writes; a snapshot through entry 500 needs 501 onwards. Retain or archive the required log during copying and replay. If it has been discarded, use a retained archive or restart from a fresh snapshot. Once caught up, continue streaming. [Snapshot and log-position protocol](https://www.postgresql.org/docs/current/protocol-replication.html)
+We can capture a consistent snapshot of the data and copy it to the follower. While that copy is happening, the leader can still receive writes, so we also need the changes since the snapshot.
+
+The important detail is keeping the snapshot's log position, not just its time. If it includes everything through entry 500, we need 501 onwards. We keep those log entries during the copy and apply them in order until the follower catches up, then keep receiving new changes. [Reference](https://www.postgresql.org/docs/current/protocol-replication.html)
 
 **When would you choose leaderless replication over a single leader?**
 
-I would choose Dynamo-style leaderless replication when write availability during partial failures matters more than a single authoritative write order, and the application can tolerate stale reads and reconcile conflicts. A coordinator contacts the key's replicas and waits for W acknowledgements, not every node. With N=3 and W=2, two reachable normal replicas can accept a write; W=3 cannot succeed with one unavailable and no fallback.
+I would choose leaderless when I want to keep accepting writes even if some nodes are unavailable, rather than depend on one leader.
 
-Durability depends on persisted copies and their failure domains, not leaderlessness alone. Accept concurrent versions and ongoing repair work; higher throughput is not automatic. Prefer a single leader when simpler ordering and application invariants dominate. [Cassandra architecture](https://cassandra.apache.org/doc/latest/cassandra/architecture/dynamo.html)
+We do not need every node to acknowledge. With three replicas A, B and C, N=3. If W=2 and C is down, A and B can still acknowledge the write. If W=3, without a spare taking C's place, we cannot get enough replies.
+
+The trade-off is that nodes can have different versions, so reads might be stale and we need to handle conflicting writes. Leaderless does not automatically mean higher throughput or better durability. [Reference](https://cassandra.apache.org/doc/latest/cassandra/architecture/dynamo.html)
 
 **What does `R + W > N` not guarantee?**
 
-N is a key's normal replica count; R and W are required read and write responses. The inequality ensures intersection only if both response sets use the same fixed replicas. It does not alone guarantee linearizability, resolve concurrent writes, or make enough replicas reachable.
+It does not mean a read will always get the latest value. The overlap depends on reads and writes using the same normal set of replicas.
 
-Concrete counterexample: normal replicas {A, B, C}, N=3, R=W=2, initially x=1. A partition prevents a writer reaching B or C, so a sloppy write of x=2 succeeds on A and spare D. Before hinted handoff, a read from B and C returns x=1. Although 2+2>3, sets {A, D} and {B, C} do not overlap: D was outside the normal N. The problem is membership, not geography. [Dynamo paper](https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf)
+For example, N=3 with normal replicas A, B and C, and R=W=2. A sloppy write of x=2 succeeds on A and spare D because B and C cannot be reached. Another client reads B and C, which still have x=1.
+
+The write set {A, D} and read set {B, C} do not overlap, even though 2+2>3. That is the issue: different nodes accepted the write from the ones serving the read, not necessarily different datacenters. [Reference](https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf)
 
 ## Three interview sentences about failover
 
-1. I would agree the acceptable data-loss window and recovery time before choosing acknowledgement and failover policies.
-2. Before promotion, I would fence the old leader and verify the candidate contains the writes our durability policy promised. [Failover fencing](https://www.postgresql.org/docs/current/warm-standby-failover.html)
-3. I would monitor replication lag, test failover and client retries, and rebuild missing replicas rather than assume promotion alone restores resilience.
+1. With async replication, I can lose a write that the leader already told the client was successful.
+2. If I cannot accept that, I would wait for the follower to save the write to disk before replying.
+3. The trade-off is that writes take longer and may have to wait or fail if the required follower is unavailable.
