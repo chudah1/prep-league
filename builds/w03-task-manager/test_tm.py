@@ -746,3 +746,26 @@ class TestLevel4:
         assert manager.get_ready_tasks(1000) == ["task_1"]
         assert manager.get_user_tasks(1001, "ann") == []
         assert manager.complete_task(1002, "task_1") is True
+
+    def test_auto_completion_orders_by_finish_time_then_numeric_id(self, manager, monkeypatch):
+        from heapq import heappop
+
+        for number in range(1, 13):
+            manager.add_task(number, f"job {number}", 1)
+        assert manager.add_user(13, "ann", 4) is True
+        assert manager.assign_task(14, "task_12", "ann", 100) is True
+        assert manager.assign_task(15, "task_1", "ann", 100) is True
+        assert manager.assign_task(16, "task_10", "ann", 90) is True
+        assert manager.assign_task(17, "task_2", "ann", 90) is True
+
+        # Final state alone cannot reveal the order of same-time completions.
+        completion_order = []
+
+        def record_pop(heap):
+            entry = heappop(heap)
+            completion_order.append(entry[-1])
+            return entry
+
+        monkeypatch.setattr("tm.heapq.heappop", record_pop)
+        assert manager.get_user_tasks(100, "ann") == []
+        assert completion_order == ["task_2", "task_10", "task_1", "task_12"]

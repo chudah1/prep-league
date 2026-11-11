@@ -1,6 +1,6 @@
 
 from dataclasses import dataclass, field
-from collections import defaultdict
+from collections import defaultdict, deque
 from enum import Enum, auto
 import heapq
 
@@ -40,14 +40,18 @@ class TaskManager:
         self.users = {}
         # task_id : User
         self.tasks_assigned:dict = {}
+        # for heap
+        self.completion = []
 
 
     def _complete_due_assignments(self, timestamp):
-        tasks = [(self.task_id_map[task_id].time_assigned, task_id ) for task_id in self.tasks_assigned]
-        heapq.heapify(tasks)
 
-        while tasks and tasks[0][0] <= timestamp:
-            finish_time, task_id = heapq.heappop(tasks)
+
+        while self.completion and self.completion[0][0] <= timestamp:
+            finish_time, _, task_id = heapq.heappop(self.completion)
+            # Manual completion leaves an old heap entry but no active assignment.
+            if task_id not in self.tasks_assigned:
+                continue
             self.task_id_map[task_id].status = Status.completed
             user = self.tasks_assigned.pop(task_id)
             user.tasks.remove(task_id)
@@ -103,21 +107,41 @@ class TaskManager:
         result = [t[0] for t in tasks][:k]
         return result
 
-    def _would_create_cycle(self, task, visiting, visited):
+    def _would_create_cycle(self, task_id, depends_on):
 
-        if task in visiting:
-            return True #cycle
+        dependencies = {
+            task : list(self.dep_tracker.get(task, ()))
+            for task in self.task_id_map
+        }
 
-        if task in visited:
-            return False #already seen
+        dependencies[task_id].append(depends_on)
 
-        visiting.add(task)
-        for dependency in self.dep_tracker[task]:
-            if self._would_create_cycle(dependency, visiting, visited):
-                return True
-        visited.add(task)
-        visiting.remove(task)
-        return False
+        # track dependencies
+        indegrees = {
+            task : len(deps)
+            for task, deps in dependencies.items()
+        }
+
+
+        #put tasks with 0 indegree count/prerequisites in the queue
+        ready_tasks = deque(task for task, count in indegrees.items() if count == 0)
+
+        # whho are those dependent on me and completeing some task will unblock who?
+        dependants = defaultdict(list)
+        for task, prerequisites in dependencies.items():
+            for dependency in prerequisites:
+                dependants[dependency].append(task)
+
+        processed = 0
+        while ready_tasks:
+            task = ready_tasks.popleft()
+            processed +=1
+
+            for dependant in dependants[task]:
+                indegrees[dependant] -=1
+                if indegrees[dependant] == 0:
+                    ready_tasks.append(dependant)
+        return processed != len(dependencies) #should have processed all if not cycle
 
 
     def add_dependency(self, timestamp, task_id, depends_on) -> bool:
@@ -128,10 +152,9 @@ class TaskManager:
 
         if depends_on in self.dep_tracker[task_id]:
             return False
-        self.dep_tracker[task_id].append(depends_on)
-        if self._would_create_cycle(task_id, set(), set()):
-            self.dep_tracker[task_id].pop()
+        if self._would_create_cycle(task_id, depends_on):
             return False
+        self.dep_tracker[task_id].append(depends_on)
         return True
 
     def complete_task(self, timestamp, task_id) -> bool:
@@ -187,15 +210,20 @@ class TaskManager:
         if user is None: return False
 
 
-        ready_tasks = self.get_ready_tasks(timestamp)
+        is_ready = task.status != Status.completed and all(
+            self.task_id_map[dependency].status == Status.completed
+            for dependency in self.dep_tracker.get(task_id, ())
+        )
 
-        if any(task_id== task for task in ready_tasks) and self.tasks_assigned.get(task_id) is None:
+        if is_ready and self.tasks_assigned.get(task_id) is None:
 
             if len(user.tasks) < user.quota and finish_ts > timestamp:
                 #assign
                 user.tasks.add(task_id)
                 self.tasks_assigned[task_id] = user
                 self.task_id_map[task_id].time_assigned = finish_ts
+                numeric_id = int(task_id.split("_")[1])
+                heapq.heappush(self.completion, (finish_ts, numeric_id, task_id))
                 return True
         return False
 
